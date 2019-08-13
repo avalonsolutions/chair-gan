@@ -39,6 +39,9 @@ parser.add_argument("--scale_size", type=int, default=286, help="scale images to
 parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
 parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
 parser.set_defaults(flip=True)
+parser.add_argument("--rotate", dest="rotate", action="store_true", help="rotate image randomly")
+parser.add_argument("--no_rotate", dest="rotate", action="store_false", help="don't rotate image randomly")
+parser.set_defaults(rotate=True)
 parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
 parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
 parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
@@ -289,10 +292,14 @@ def load_examples():
     # synchronize seed for image operations so that we do the same operations to both
     # input and output images
     seed = random.randint(0, 2**31 - 1)
+    degrees = random.randint(-45, 45)* math.pi / 180
     def transform(image):
         r = image
         if a.flip:
             r = tf.image.random_flip_left_right(r, seed=seed)
+
+        if a.rotate:
+            r =  tf.contrib.image.rotate(r, degrees, interpolation='NEAREST')
 
         # area produces a nice downscaling, but does nearest neighbor for upscaling
         # assume we're going to be doing downscaling here
@@ -558,6 +565,7 @@ def main():
         # disable these features in test mode
         a.scale_size = CROP_SIZE
         a.flip = False
+        a.rotate = False
 
     for k, v in a._get_kwargs():
         print(k, "=", v)
