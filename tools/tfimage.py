@@ -131,10 +131,10 @@ def save(image, path, replace=False):
         raise Exception("invalid image suffix")
 
     dirname = os.path.dirname(path)
-    if dirname != "" and not os.path.exists(dirname):
+    if dirname != "" and not tf.io.gfile.exists(dirname):
         os.makedirs(dirname)
 
-    if os.path.exists(path):
+    if tf.io.gfile.exists(path):
         if replace:
             os.remove(path)
         else:

@@ -13,6 +13,8 @@ import tfimage as im
 import threading
 import time
 import multiprocessing
+import cv2
+from skimage.morphology import skeletonize
 
 edge_pool = None
 
@@ -20,15 +22,18 @@ edge_pool = None
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
 parser.add_argument("--output_dir", required=True, help="output path")
-parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine", "edges"])
+parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine", "edges", "sketch"])
 parser.add_argument("--workers", type=int, default=1, help="number of workers")
 # resize
 parser.add_argument("--pad", action="store_true", help="pad instead of crop for resize operation")
 parser.add_argument("--size", type=int, default=256, help="size to use for resize operation")
 # combine
 parser.add_argument("--b_dir", type=str, help="path to folder containing B images for combine operation")
-a = parser.parse_args()
+# edges
+parser.add_argument("--crop", action="store_true", help="crop the image before edge detection. Only works when background is white.")
+parser.add_argument("--crop_dir", help="path for cropped original images")
 
+a = parser.parse_args()
 
 def resize(src):
     height, width, _ = src.shape
@@ -79,7 +84,7 @@ def combine(src, src_path):
     basename, _ = os.path.splitext(os.path.basename(src_path))
     for ext in [".png", ".jpg"]:
         sibling_path = os.path.join(a.b_dir, basename + ext)
-        if os.path.exists(sibling_path):
+        if tf.io.gfile.exists(sibling_path):
             sibling = im.load(sibling_path)
             break
     else:
@@ -111,88 +116,78 @@ def grayscale(src):
     return im.grayscale_to_rgb(images=im.rgb_to_grayscale(images=src))
 
 
-net = None
-def run_caffe(src):
-    # lazy load caffe and create net
-    global net
-    if net is None:
-        # don't require caffe unless we are doing edge detection
-        os.environ["GLOG_minloglevel"] = "2" # disable logging from caffe
-        import caffe
-        # using this requires using the docker image or assembling a bunch of dependencies
-        # and then changing these hardcoded paths
-        net = caffe.Net("/opt/caffe/examples/hed/deploy.prototxt", "/opt/caffe/hed_pretrained_bsds.caffemodel", caffe.TEST)
-        
-    net.blobs["data"].reshape(1, *src.shape)
-    net.blobs["data"].data[...] = src
-    net.forward()
-    return net.blobs["sigmoid-fuse"].data[0][0,:,:]
+def crop_and_resize(src, return_gray = False):
+    """
+    crop edge image to discard white pad, and resize to training size
+    based on: https://stackoverflow.com/questions/48395434/how-to-crop-or-remove-white-background-from-an-image
+    [OBS!] only works on image with white background
+    """
+    height, width, _ = src.shape
 
-    
+    # (1) Convert to gray, and threshold
+    gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+    th, threshed = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+
+    # (2) Morph-op to remove noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    morphed = cv2.morphologyEx(threshed, cv2.MORPH_CLOSE, kernel)
+
+    # (3) Find the max-area contour
+    cnts = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
+    cnt = sorted(cnts, key=cv2.contourArea)[-1]
+
+    # (4) Crop
+    x, y, w, h = cv2.boundingRect(cnt)
+    x_1 = max(x, x - 10)
+    y_1 = max(y, y - 10)
+    x_2 = min(x+w, width)
+    y_2 = min(y+h, height)
+    if return_gray:
+        dst = gray[y_1:y_2, x_1:x_2]
+    else:
+        dst = src[y_1:y_2, x_1:x_2]
+    # pad white to resize
+    height = int(max(0, w - h) / 2.0)
+    width = int(max(0, h - w) / 2.0)
+    padded = cv2.copyMakeBorder(dst, height, height, width, width, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+
+    return cv2.resize(padded, (a.size, a.size), interpolation=cv2.INTER_AREA)
+
+
 def edges(src):
-    # based on https://github.com/phillipi/pix2pix/blob/master/scripts/edges/batch_hed.py
-    # and https://github.com/phillipi/pix2pix/blob/master/scripts/edges/PostprocessHED.m
-    import scipy.io
-    src = src * 255
-    border = 128 # put a padding around images since edge detection seems to detect edge of image
-    src = src[:,:,:3] # remove alpha channel if present
-    src = np.pad(src, ((border, border), (border, border), (0,0)), "reflect")
-    src = src[:,:,::-1]
-    src -= np.array((104.00698793,116.66876762,122.67891434))
-    src = src.transpose((2, 0, 1))
+    src = np.asarray(src * 255, np.uint8)
+    if a.crop:
+        src = crop_and_resize(src)
+    # detect edges based on Canny Edge Dection
+    edge = cv2.bitwise_not(cv2.Canny(src, 80, 130))
+    dst = cv2.cvtColor(edge, cv2.COLOR_GRAY2RGB)
+    if a.crop:
+        return np.asarray(src/255., np.float32), dst
+    else:
+        return dst
 
-    # [height, width, channels] => [batch, channel, height, width]
-    fuse = edge_pool.apply(run_caffe, [src])
-    fuse = fuse[border:-border, border:-border]
 
-    with tempfile.NamedTemporaryFile(suffix=".png") as png_file, tempfile.NamedTemporaryFile(suffix=".mat") as mat_file:
-        scipy.io.savemat(mat_file.name, {"input": fuse})
-        
-        octave_code = r"""
-E = 1-load(input_path).input;
-E = imresize(E, [image_width,image_width]);
-E = 1 - E;
-E = single(E);
-[Ox, Oy] = gradient(convTri(E, 4), 1);
-[Oxx, ~] = gradient(Ox, 1);
-[Oxy, Oyy] = gradient(Oy, 1);
-O = mod(atan(Oyy .* sign(-Oxy) ./ (Oxx + 1e-5)), pi);
-E = edgesNmsMex(E, O, 1, 5, 1.01, 1);
-E = double(E >= max(eps, threshold));
-E = bwmorph(E, 'thin', inf);
-E = bwareaopen(E, small_edge);
-E = 1 - E;
-E = uint8(E * 255);
-imwrite(E, output_path);
-"""
-
-        config = dict(
-            input_path="'%s'" % mat_file.name,
-            output_path="'%s'" % png_file.name,
-            image_width=256,
-            threshold=25.0/255.0,
-            small_edge=5,
-        )
-
-        args = ["octave"]
-        for k, v in config.items():
-            args.extend(["--eval", "%s=%s;" % (k, v)])
-
-        args.extend(["--eval", octave_code])
-        try:
-            subprocess.check_output(args, stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as e:
-            print("octave failed")
-            print("returncode:", e.returncode)
-            print("output:", e.output)
-            raise
-        return im.load(png_file.name)
+def sketch(src):
+    # Process sketch to fit input. Only used for test input
+    src = np.asarray(src * 255, np.uint8)
+    # Crop the sketch and minimize white padding.
+    cropped = crop_and_resize(src, return_gray = True)
+    # Skeletonize the lines
+    skeleton = skeletonize(cropped / 255)
+    final = 1 - np.float32(skeleton)
+    return np.asarray(src, np.float32)
 
 
 def process(src_path, dst_path):
     src = im.load(src_path)
-
-    if a.operation == "grayscale":
+    if a.operation == "edges":
+        if a.crop:
+            name = dst_path.split("/")[-1]
+            src, dst = edges(src)
+            im.save(src, os.path.join(a.crop_dir, name))
+        else:
+            dst = edges(src)
+    elif a.operation == "grayscale":
         dst = grayscale(src)
     elif a.operation == "resize":
         dst = resize(src)
@@ -200,8 +195,8 @@ def process(src_path, dst_path):
         dst = blank(src)
     elif a.operation == "combine":
         dst = combine(src, src_path)
-    elif a.operation == "edges":
-        dst = edges(src)
+    elif a.operation == "sketch":
+        dst = sketch(src)
     else:
         raise Exception("invalid operation")
 
@@ -232,8 +227,14 @@ def complete():
 
 
 def main():
-    if not os.path.exists(a.output_dir):
-        os.makedirs(a.output_dir)
+    if not tf.io.gfile.exists(a.output_dir):
+        tf.io.gfile.makedirs(a.output_dir)
+    if a.operation == "edges" and a.crop:
+        try:
+            if not tf.io.gfile.exists(a.crop_dir):
+                tf.io.gfile.makedirs(a.crop_dir)
+        except Exception as e:
+            raise Exception("invalid crop_dir: {:s}".format(e))
 
     src_paths = []
     dst_paths = []
@@ -242,7 +243,7 @@ def main():
     for src_path in im.find(a.input_dir):
         name, _ = os.path.splitext(os.path.basename(src_path))
         dst_path = os.path.join(a.output_dir, name + ".png")
-        if os.path.exists(dst_path):
+        if tf.io.gfile.exists(dst_path):
             skipped += 1
         else:
             src_paths.append(src_path)
@@ -257,12 +258,8 @@ def main():
 
     global start
     start = time.time()
-    
-    if a.operation == "edges":
-        # use a multiprocessing pool for this operation so it can use multiple CPUs
-        # create the pool before we launch processing threads
-        global edge_pool
-        edge_pool = multiprocessing.Pool(a.workers)
+
+
 
     if a.workers == 1:
         with tf.Session() as sess:
