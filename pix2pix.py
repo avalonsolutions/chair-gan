@@ -299,7 +299,7 @@ def load_examples():
             r = tf.image.random_flip_left_right(r, seed=seed)
 
         if a.rotate:
-            r =  tf.contrib.image.rotate(r, degrees, interpolation='NEAREST')
+            r = tf.contrib.image.rotate(r, degrees, interpolation='NEAREST')
 
         # area produces a nice downscaling, but does nearest neighbor for upscaling
         # assume we're going to be doing downscaling here
@@ -578,9 +578,9 @@ def main():
         if a.lab_colorization:
             raise Exception("export not supported for lab_colorization")
 
-        input = tf.placeholder(tf.string, shape=[1])
-        input_data = tf.decode_base64(input[0])
-        input_image = tf.image.decode_png(input_data)
+        input = tf.placeholder(tf.string, shape=(None, ), name="image_bytes")
+        # input_data = tf.io.decode_base64(x[0]) # AI platform automatically decode base64 to bytes
+        input_image = tf.image.decode_png(input[0])
 
         # remove alpha channel if present
         input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
@@ -601,7 +601,9 @@ def main():
             output_data = tf.image.encode_jpeg(output_image, quality=80)
         else:
             raise Exception("invalid filetype")
-        output = tf.convert_to_tensor([tf.encode_base64(output_data)])
+        # output = tf.convert_to_tensor([tf.encode_base64(output_data)], name="output_bytes")
+        # AI platform automatically encode to base54
+        output = tf.identity(output_data, name="output_bytes")
 
         key = tf.placeholder(tf.string, shape=[1])
         inputs = {
@@ -627,6 +629,14 @@ def main():
             print("exporting model")
             export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
             export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
+
+            print("simple save to export model for serving")
+            tf.saved_model.simple_save(
+                sess,
+                os.path.join(a.output_dir, "export"),
+                {"image_bytes": input},
+                {"output_bytes": output},
+            )
 
         return
 
@@ -713,7 +723,7 @@ def main():
     with tf.name_scope("parameter_count"):
         parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
 
-    saver = tf.train.Saver(max_to_keep=1)
+    saver = tf.train.Saver(max_to_keep=3)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
