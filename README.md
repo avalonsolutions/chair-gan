@@ -83,7 +83,21 @@ The testing mode will load some of the configuration options from the checkpoint
 The test run will output an HTML file at `test/chair-gan/index.html` that shows input/output/target image sets
 
 ## Model export and Serving
-Please check [notebook](notebooks/Export_model_and_serve.ipynb) for information of model export and serving.
+Currently pre-processing of sketch data is not implemented as custom script which can be called by AI-platform. 
+As a result, preprocessing is needed to be done separately, with steps:
+1. Crop sketch image
+1. Resizeing to 256 x 256
+1. Skeletonization of sketch lines
+
+Batch processing of the data can be done by:
+``` sh
+python tools/process.py \
+  --input_dir data/<sketches> \
+  --operation sketch\
+  --output_dir data/<processed sketches>
+```
+
+For information of model export and serving, please check [notebook](notebooks/Export_model_and_serve.ipynb) 
 
 ## Unimplemented Features
 
