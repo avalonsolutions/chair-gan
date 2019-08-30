@@ -5,16 +5,13 @@ from __future__ import print_function
 
 import argparse
 import os
-import tempfile
-import subprocess
 import tensorflow as tf
 import numpy as np
 import tfimage as im
 import threading
 import time
-import multiprocessing
 import cv2
-from skimage.morphology import skeletonize
+from skimage.morphology import thin
 
 edge_pool = None
 
@@ -22,7 +19,7 @@ edge_pool = None
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True, help="path to folder containing images")
 parser.add_argument("--output_dir", required=True, help="output path")
-parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine", "edges", "sketch"])
+parser.add_argument("--operation", required=True, choices=["grayscale", "resize", "blank", "combine", "edges", "skeletonize"])
 parser.add_argument("--workers", type=int, default=1, help="number of workers")
 # resize
 parser.add_argument("--pad", action="store_true", help="pad instead of crop for resize operation")
@@ -151,7 +148,7 @@ def crop_and_resize(src, return_gray = False):
     width = int(max(0, h - w) / 2.0)
     padded = cv2.copyMakeBorder(dst, height, height, width, width, cv2.BORDER_CONSTANT, value=[255, 255, 255])
 
-    return cv2.resize(padded, (a.size, a.size), interpolation=cv2.INTER_AREA)
+    return cv2.resize(padded, (a.size, a.size), interpolation=cv2.INTER_NEAREST)
 
 
 def edges(src):
@@ -167,16 +164,15 @@ def edges(src):
         return dst
 
 
-def sketch(src):
+def skeletonize_edge(src):
     # Process sketch to fit input. Only used for test input
     src = np.asarray(src * 255, np.uint8)
     # Crop the sketch and minimize white padding.
-    cropped = crop_and_resize(src, return_gray = True)
+    cropped = crop_and_resize(src, return_gray=True)
     # Skeletonize the lines
-    skeleton = skeletonize(cropped / 255)
-    final = 1 - np.float32(skeleton)
-    return np.asarray(src, np.float32)
-
+    skeleton = thin(cv2.bitwise_not(cropped))
+    final = np.asarray(1 - np.float32(skeleton))
+    return cv2.cvtColor(final, cv2.COLOR_GRAY2BGR)
 
 def process(src_path, dst_path):
     src = im.load(src_path)
@@ -195,8 +191,8 @@ def process(src_path, dst_path):
         dst = blank(src)
     elif a.operation == "combine":
         dst = combine(src, src_path)
-    elif a.operation == "sketch":
-        dst = sketch(src)
+    elif a.operation == "skeletonize":
+        dst = skeletonize_edge(src)
     else:
         raise Exception("invalid operation")
 
