@@ -2,6 +2,7 @@ import cv2
 from skimage.morphology import thin
 import numpy as np
 import base64
+import json
 
 def crop_and_resize(src):
     """
@@ -37,18 +38,20 @@ def crop_and_resize(src):
 
     return cv2.resize(padded, (256, 256), interpolation=cv2.INTER_NEAREST)
 
-def preprocess(data):
+
+def preprocess(request):
+    data = request.get_json()
     img_b64 = data["img"]
-    img_bytes=base64.b64decode(img_b64)
-    src = cv2.imdecode(np.frombuffer(data, np.uint8), -1)
-    
+    img_bytes = base64.b64decode(img_b64)
+    src = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), -1)
+
     # Crop the sketch and minimize white padding.
     cropped = crop_and_resize(src)
     # Skeletonize the lines
     skeleton = thin(cv2.bitwise_not(cropped))
     final = np.asarray(1 - np.float32(skeleton))
     fixed_channel = cv2.cvtColor(final, cv2.COLOR_GRAY2BGR)
-    
-    _, img_png = cv2.imencode('.png', fixed_channel)
+
+    _, img_png = cv2.imencode('.png', fixed_channel * 255)
     encoded_input_string = base64.b64encode(img_png.tobytes())
-    return {'image_bytes': {"b64": encoded_input_string.decode()}} 
+    return json.dumps({'image_bytes': {"b64": encoded_input_string.decode()}})
